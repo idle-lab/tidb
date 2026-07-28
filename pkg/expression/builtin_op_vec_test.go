@@ -157,6 +157,252 @@ func makeBinaryLogicOpDataGeners() []dataGenerator {
 
 func TestVectorizedBuiltinOpFunc(t *testing.T) {
 	testVectorizedBuiltinFunc(t, vecBuiltinOpCases)
+	testVectorizedLogicOpShortCircuit(t)
+}
+
+type logicOpTestValue struct {
+	value  int64
+	isNull bool
+}
+
+type logicOpTestRow struct {
+	lhs logicOpTestValue
+	rhs logicOpTestValue
+}
+
+type selectionRecordingExpr struct {
+	Expression
+	selections [][]int
+	err        error
+}
+
+func (e *selectionRecordingExpr) VecEvalInt(ctx EvalContext, input *chunk.Chunk, result *chunk.Column) error {
+	e.selections = append(e.selections, append([]int(nil), input.Sel()...))
+	if e.err != nil {
+		return e.err
+	}
+	return e.Expression.VecEvalInt(ctx, input, result)
+}
+
+func (e *selectionRecordingExpr) EvalInt(ctx EvalContext, row chunk.Row) (int64, bool, error) {
+	if e.err != nil {
+		return 0, true, e.err
+	}
+	return e.Expression.EvalInt(ctx, row)
+}
+
+func newLogicOpTestInput(rows []logicOpTestRow, sel []int) (*chunk.Chunk, *Column, *Column) {
+	physicalRows := len(rows)
+	rowsByPhysicalIndex := rows
+	if sel != nil {
+		physicalRows = 0
+		for _, physicalRow := range sel {
+			physicalRows = max(physicalRows, physicalRow+1)
+		}
+		rowsByPhysicalIndex = make([]logicOpTestRow, physicalRows)
+		for logicalRow, physicalRow := range sel {
+			rowsByPhysicalIndex[physicalRow] = rows[logicalRow]
+		}
+	}
+
+	fts := []*types.FieldType{eType2FieldType(types.ETInt), eType2FieldType(types.ETInt)}
+	input := chunk.NewChunkWithCapacity(fts, physicalRows)
+	for _, row := range rowsByPhysicalIndex {
+		if row.lhs.isNull {
+			input.AppendNull(0)
+		} else {
+			input.AppendInt64(0, row.lhs.value)
+		}
+		if row.rhs.isNull {
+			input.AppendNull(1)
+		} else {
+			input.AppendInt64(1, row.rhs.value)
+		}
+	}
+	input.SetSel(sel)
+	return input,
+		&Column{Index: 0, RetType: fts[0]},
+		&Column{Index: 1, RetType: fts[1]}
+}
+
+func testVectorizedLogicOp(
+	t *testing.T,
+	funcName string,
+	shortCircuitEnabled bool,
+	rows []logicOpTestRow,
+	sel []int,
+	expectedRHSSelections [][]int,
+	expected []logicOpTestValue,
+) {
+	ctx := mock.NewContext()
+	shortCircuitSetting := "OFF"
+	if shortCircuitEnabled {
+		shortCircuitSetting = "ON"
+	}
+	require.NoError(t, ctx.GetSessionVars().SetSystemVar("tidb_enable_short_circuit_expression", shortCircuitSetting))
+	originalSel := append([]int(nil), sel...)
+	input, lhs, rhs := newLogicOpTestInput(rows, sel)
+	recordedRHS := &selectionRecordingExpr{Expression: rhs}
+	f, err := funcs[funcName].getFunction(ctx, []Expression{lhs, recordedRHS})
+	require.NoError(t, err)
+	require.True(t, f.vectorized() && f.isChildrenVectorized())
+
+	result := chunk.NewColumn(eType2FieldType(types.ETInt), len(rows))
+	require.NoError(t, f.vecEvalInt(ctx, input, result))
+	require.Equal(t, originalSel, input.Sel())
+	require.Equal(t, expectedRHSSelections, recordedRHS.selections)
+	require.Equal(t, len(expected), getColumnLen(result, types.ETInt))
+
+	values := result.Int64s()
+	for i, expectedValue := range expected {
+		require.Equal(t, expectedValue.isNull, result.IsNull(i))
+		if !expectedValue.isNull {
+			require.Equal(t, expectedValue.value, values[i])
+		}
+	}
+}
+
+func testVectorizedLogicOpShortCircuit(t *testing.T) {
+	null := logicOpTestValue{isNull: true}
+
+	// The original selection is reordered and does not cover every physical row.
+	// Logical OR should pass only rows whose LHS is not true to the RHS.
+	orRows := []logicOpTestRow{
+		{lhs: logicOpTestValue{value: 2}, rhs: logicOpTestValue{}},
+		{lhs: logicOpTestValue{}, rhs: logicOpTestValue{value: 1}},
+		{lhs: null, rhs: logicOpTestValue{value: 1}},
+		{lhs: null, rhs: logicOpTestValue{}},
+		{lhs: null, rhs: null},
+		{lhs: logicOpTestValue{}, rhs: null},
+		{lhs: logicOpTestValue{}, rhs: logicOpTestValue{}},
+	}
+	orSel := []int{7, 2, 8, 1, 6, 3, 5}
+	testVectorizedLogicOp(t, ast.LogicOr, true, orRows, orSel,
+		[][]int{{2, 8, 1, 6, 3, 5}},
+		[]logicOpTestValue{
+			{value: 1}, // A nonzero LHS is normalized to TRUE without evaluating RHS.
+			{value: 1},
+			{value: 1},
+			null,
+			null,
+			null,
+			{},
+		})
+
+	// Logical AND should pass only rows whose LHS is not false to the RHS.
+	andRows := []logicOpTestRow{
+		{lhs: logicOpTestValue{}, rhs: logicOpTestValue{value: 1}},
+		{lhs: logicOpTestValue{value: 2}, rhs: logicOpTestValue{value: 3}},
+		{lhs: null, rhs: logicOpTestValue{}},
+		{lhs: null, rhs: logicOpTestValue{value: 1}},
+		{lhs: null, rhs: null},
+		{lhs: logicOpTestValue{value: 1}, rhs: null},
+		{lhs: logicOpTestValue{value: 1}, rhs: logicOpTestValue{}},
+	}
+	andSel := []int{6, 1, 8, 2, 7, 3, 5}
+	testVectorizedLogicOp(t, ast.LogicAnd, true, andRows, andSel,
+		[][]int{{1, 8, 2, 7, 3, 5}},
+		[]logicOpTestValue{
+			{},
+			{value: 1},
+			{},
+			null,
+			null,
+			null,
+			{},
+		})
+
+	// Disabling short-circuit evaluation preserves the legacy eager RHS path.
+	testVectorizedLogicOp(t, ast.LogicOr, false, orRows, orSel,
+		[][]int{orSel},
+		[]logicOpTestValue{{value: 1}, {value: 1}, {value: 1}, null, null, null, {}})
+	testVectorizedLogicOp(t, ast.LogicAnd, false, andRows, andSel,
+		[][]int{andSel},
+		[]logicOpTestValue{{}, {value: 1}, {}, null, null, null, {}})
+
+	// Exercise both short-circuit fast paths and a chunk without an original selection.
+	testVectorizedLogicOp(t, ast.LogicOr, true,
+		[]logicOpTestRow{
+			{lhs: logicOpTestValue{value: 2}},
+			{lhs: logicOpTestValue{value: -1}},
+		},
+		[]int{3, 1}, nil,
+		[]logicOpTestValue{{value: 1}, {value: 1}})
+	testVectorizedLogicOp(t, ast.LogicOr, true,
+		[]logicOpTestRow{
+			{rhs: logicOpTestValue{value: 1}},
+			{lhs: null, rhs: logicOpTestValue{}},
+		},
+		[]int{2, 0}, [][]int{{2, 0}},
+		[]logicOpTestValue{{value: 1}, null})
+	testVectorizedLogicOp(t, ast.LogicOr, true,
+		[]logicOpTestRow{
+			{lhs: logicOpTestValue{value: 1}},
+			{rhs: logicOpTestValue{value: 1}},
+		},
+		nil, [][]int{{1}},
+		[]logicOpTestValue{{value: 1}, {value: 1}})
+	testVectorizedLogicOp(t, ast.LogicAnd, true,
+		[]logicOpTestRow{
+			{lhs: logicOpTestValue{}},
+			{lhs: logicOpTestValue{}},
+		},
+		[]int{3, 1}, nil,
+		[]logicOpTestValue{{}, {}})
+	testVectorizedLogicOp(t, ast.LogicAnd, true,
+		[]logicOpTestRow{
+			{lhs: logicOpTestValue{value: 1}, rhs: logicOpTestValue{value: 2}},
+			{lhs: null, rhs: logicOpTestValue{}},
+		},
+		[]int{2, 0}, [][]int{{2, 0}},
+		[]logicOpTestValue{{value: 1}, {}})
+	testVectorizedLogicOp(t, ast.LogicAnd, true,
+		[]logicOpTestRow{
+			{lhs: logicOpTestValue{}},
+			{lhs: logicOpTestValue{value: 1}, rhs: logicOpTestValue{value: 1}},
+		},
+		nil, [][]int{{1}},
+		[]logicOpTestValue{{}, {value: 1}})
+
+	testVectorizedLogicOpRestoresSelectionOnError(t, ast.LogicOr,
+		[]logicOpTestRow{
+			{lhs: logicOpTestValue{value: 1}},
+			{lhs: logicOpTestValue{}},
+			{lhs: null},
+		},
+		[]int{4, 1, 3}, []int{1, 3})
+	testVectorizedLogicOpRestoresSelectionOnError(t, ast.LogicAnd,
+		[]logicOpTestRow{
+			{lhs: logicOpTestValue{}},
+			{lhs: logicOpTestValue{value: 1}},
+			{lhs: null},
+		},
+		[]int{4, 1, 3}, []int{1, 3})
+}
+
+func testVectorizedLogicOpRestoresSelectionOnError(
+	t *testing.T,
+	funcName string,
+	rows []logicOpTestRow,
+	sel []int,
+	expectedRHSSelection []int,
+) {
+	ctx := mock.NewContext()
+	require.NoError(t, ctx.GetSessionVars().SetSystemVar("tidb_enable_short_circuit_expression", "ON"))
+	originalSel := append([]int(nil), sel...)
+	input, lhs, rhs := newLogicOpTestInput(rows, sel)
+	recordedRHS := &selectionRecordingExpr{
+		Expression: rhs,
+		err:        types.ErrOverflow.GenWithStackByArgs("BIGINT", "short circuit test"),
+	}
+	f, err := funcs[funcName].getFunction(ctx, []Expression{lhs, recordedRHS})
+	require.NoError(t, err)
+	require.True(t, f.vectorized() && f.isChildrenVectorized())
+
+	result := chunk.NewColumn(eType2FieldType(types.ETInt), len(rows))
+	require.Error(t, f.vecEvalInt(ctx, input, result))
+	require.Equal(t, originalSel, input.Sel())
+	require.Equal(t, [][]int{expectedRHSSelection}, recordedRHS.selections)
 }
 
 func BenchmarkVectorizedBuiltinOpFunc(b *testing.B) {

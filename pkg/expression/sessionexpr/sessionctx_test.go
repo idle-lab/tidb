@@ -76,6 +76,9 @@ func TestSessionEvalContextBasic(t *testing.T) {
 	require.NoError(t, ctx.GetSessionVars().SetSystemVar("default_week_format", "5"))
 	require.Equal(t, "5", impl.GetDefaultWeekFormatMode())
 	require.Same(t, vars.UserVars, impl.GetUserVarsReader())
+	require.False(t, impl.IsShortCircuitExpressionEnabled())
+	require.NoError(t, vars.SetSystemVar("tidb_enable_short_circuit_expression", "ON"))
+	require.True(t, impl.IsShortCircuitExpressionEnabled())
 
 	// handle warnings
 	require.Equal(t, 0, impl.WarningCount())

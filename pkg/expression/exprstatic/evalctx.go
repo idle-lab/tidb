@@ -72,19 +72,20 @@ func (t *timeOnce) getTime(loc *time.Location) (tm time.Time, err error) {
 // evalCtxState is the internal state for `EvalContext`.
 // We make it as a standalone private struct here to make sure `EvalCtxOption` can only be called in constructor.
 type evalCtxState struct {
-	warnHandler           contextutil.WarnHandler
-	sqlMode               mysql.SQLMode
-	typeCtx               types.Context
-	errCtx                errctx.Context
-	currentDB             string
-	currentTime           *timeOnce
-	maxAllowedPacket      uint64
-	enableRedactLog       string
-	defaultWeekFormatMode string
-	divPrecisionIncrement int
-	paramList             []types.Datum
-	userVars              variable.UserVarsReader
-	props                 expropt.OptionalEvalPropProviders
+	warnHandler                  contextutil.WarnHandler
+	sqlMode                      mysql.SQLMode
+	typeCtx                      types.Context
+	errCtx                       errctx.Context
+	currentDB                    string
+	currentTime                  *timeOnce
+	maxAllowedPacket             uint64
+	enableRedactLog              string
+	defaultWeekFormatMode        string
+	divPrecisionIncrement        int
+	enableShortCircuitExpression bool
+	paramList                    []types.Datum
+	userVars                     variable.UserVarsReader
+	props                        expropt.OptionalEvalPropProviders
 }
 
 // EvalCtxOption is the option to set `EvalContext`.
@@ -172,6 +173,13 @@ func WithDivPrecisionIncrement(inc int) EvalCtxOption {
 	}
 }
 
+// WithEnableShortCircuitExpression sets whether short-circuit expression evaluation is enabled.
+func WithEnableShortCircuitExpression(enabled bool) EvalCtxOption {
+	return func(s *evalCtxState) {
+		s.enableShortCircuitExpression = enabled
+	}
+}
+
 // WithOptionalProperty sets the optional property providers
 func WithOptionalProperty(providers ...exprctx.OptionalEvalPropProvider) EvalCtxOption {
 	return func(s *evalCtxState) {
@@ -227,12 +235,13 @@ func NewEvalContext(opt ...EvalCtxOption) *EvalContext {
 	ctx := &EvalContext{
 		id: contextutil.GenContextID(),
 		evalCtxState: evalCtxState{
-			currentTime:           &timeOnce{},
-			sqlMode:               defaultSQLMode,
-			maxAllowedPacket:      vardef.DefMaxAllowedPacket,
-			enableRedactLog:       vardef.DefTiDBRedactLog,
-			defaultWeekFormatMode: vardef.DefDefaultWeekFormat,
-			divPrecisionIncrement: vardef.DefDivPrecisionIncrement,
+			currentTime:                  &timeOnce{},
+			sqlMode:                      defaultSQLMode,
+			maxAllowedPacket:             vardef.DefMaxAllowedPacket,
+			enableRedactLog:              vardef.DefTiDBRedactLog,
+			defaultWeekFormatMode:        vardef.DefDefaultWeekFormat,
+			divPrecisionIncrement:        vardef.DefDivPrecisionIncrement,
+			enableShortCircuitExpression: vardef.DefTiDBEnableShortCircuitExpression,
 		},
 	}
 
@@ -347,6 +356,11 @@ func (ctx *EvalContext) GetDivPrecisionIncrement() int {
 	return ctx.divPrecisionIncrement
 }
 
+// IsShortCircuitExpressionEnabled returns whether short-circuit expression evaluation is enabled.
+func (ctx *EvalContext) IsShortCircuitExpressionEnabled() bool {
+	return ctx.enableShortCircuitExpression
+}
+
 // GetUserVarsReader returns the user variables.
 func (ctx *EvalContext) GetUserVarsReader() variable.UserVarsReader {
 	return ctx.userVars
@@ -434,6 +448,8 @@ func (ctx *EvalContext) loadSessionVarsInternal(
 			opts = append(opts, WithDefaultWeekFormatMode(val))
 		case vardef.DivPrecisionIncrement:
 			opts = append(opts, WithDivPrecisionIncrement(sessionVars.DivPrecisionIncrement))
+		case vardef.TiDBEnableShortCircuitExpression:
+			opts = append(opts, WithEnableShortCircuitExpression(sessionVars.EnableShortCircuitExpression))
 		}
 	}
 	return ctx.Apply(opts...)
@@ -526,6 +542,7 @@ func MakeEvalContextStatic(ctx exprctx.StaticConvertibleEvalContext) *EvalContex
 		WithMaxAllowedPacket(ctx.GetMaxAllowedPacket()),
 		WithDefaultWeekFormatMode(ctx.GetDefaultWeekFormatMode()),
 		WithDivPrecisionIncrement(ctx.GetDivPrecisionIncrement()),
+		WithEnableShortCircuitExpression(ctx.IsShortCircuitExpressionEnabled()),
 		WithParamList(params),
 		WithUserVarsReader(ctx.GetUserVarsReader().Clone()),
 		WithOptionalProperty(props...),

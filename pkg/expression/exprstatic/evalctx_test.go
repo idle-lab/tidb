@@ -468,6 +468,7 @@ func TestMakeEvalContextStatic(t *testing.T) {
 		WithMaxAllowedPacket(12345),
 		WithDefaultWeekFormatMode("3"),
 		WithDivPrecisionIncrement(5),
+		WithEnableShortCircuitExpression(true),
 		WithParamList(paramList),
 		WithUserVarsReader(userVars),
 		WithOptionalProperty(provider),
@@ -587,6 +588,15 @@ func TestEvalCtxLoadSystemVars(t *testing.T) {
 				require.Equal(t, vars.DivPrecisionIncrement, ctx.GetDivPrecisionIncrement())
 			},
 		},
+		{
+			name:  vardef.TiDBEnableShortCircuitExpression,
+			val:   vardef.On,
+			field: "$.enableShortCircuitExpression",
+			assert: func(ctx *EvalContext, vars *variable.SessionVars) {
+				require.True(t, ctx.IsShortCircuitExpressionEnabled())
+				require.Equal(t, vars.EnableShortCircuitExpression, ctx.IsShortCircuitExpressionEnabled())
+			},
+		},
 	}
 
 	// nonVarRelatedFields means the fields not related to any system variables.
@@ -602,7 +612,6 @@ func TestEvalCtxLoadSystemVars(t *testing.T) {
 		"$.userVars",
 		"$.props",
 	}
-
 	// varsRelatedFields means the fields related to
 	varsRelatedFields := make([]string, 0, len(vars))
 	varsMap := make(map[string]string)

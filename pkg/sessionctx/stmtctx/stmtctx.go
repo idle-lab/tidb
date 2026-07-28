@@ -453,6 +453,8 @@ type StatementContext struct {
 
 	// SysdateIsNow indicates whether sysdate() is an alias of now() in this statement
 	SysdateIsNow bool
+	// EnableShortCircuitExpression indicates whether short-circuit expression evaluation is enabled for this statement.
+	EnableShortCircuitExpression bool
 
 	// RCCheckTS indicates the current read-consistency read select statement will use `RCCheckTS` path.
 	RCCheckTS bool
@@ -1252,6 +1254,9 @@ func (sc *StatementContext) GetExecDetails() execdetails.ExecDetails {
 func (sc *StatementContext) PushDownFlags() uint64 {
 	ec := sc.ErrCtx()
 	flags := PushDownFlagsWithTypeFlagsAndErrLevels(sc.TypeFlags(), ec.LevelMap())
+	if sc.EnableShortCircuitExpression {
+		flags |= model.FlagEnableShortCircuitExpression
+	}
 	if sc.InInsertStmt {
 		flags |= model.FlagInInsertStmt
 	} else if sc.InUpdateStmt || sc.InDeleteStmt {
@@ -1293,6 +1298,7 @@ func (sc *StatementContext) InitFromPBFlagAndTz(flags uint64, tz *time.Location)
 	sc.InInsertStmt = (flags & model.FlagInInsertStmt) > 0
 	sc.InSelectStmt = (flags & model.FlagInSelectStmt) > 0
 	sc.InDeleteStmt = (flags & model.FlagInUpdateOrDeleteStmt) > 0
+	sc.EnableShortCircuitExpression = (flags & model.FlagEnableShortCircuitExpression) > 0
 	levels := sc.ErrLevels()
 	levels[errctx.ErrGroupDividedByZero] = errctx.ResolveErrLevel(false,
 		(flags&model.FlagDividedByZeroAsWarning) > 0,

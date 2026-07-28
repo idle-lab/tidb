@@ -74,6 +74,106 @@ func (b *builtinLogicOrSig) fallbackEvalInt(ctx EvalContext, input *chunk.Chunk,
 }
 
 func (b *builtinLogicOrSig) vecEvalInt(ctx EvalContext, input *chunk.Chunk, result *chunk.Column) error {
+	if ctx.IsShortCircuitExpressionEnabled() {
+		return b.vecEvalIntWithShortCircuit(ctx, input, result)
+	}
+	return b.vecEvalIntWithoutShortCircuit(ctx, input, result)
+}
+
+func (b *builtinLogicOrSig) vecEvalIntWithShortCircuit(ctx EvalContext, input *chunk.Chunk, result *chunk.Column) error {
+	return vecEvalLogicalOpWithShortCircuit(&b.baseBuiltinFunc, ctx, input, result, true)
+}
+
+func vecEvalLogicalOpWithShortCircuit(
+	b *baseBuiltinFunc,
+	ctx EvalContext,
+	input *chunk.Chunk,
+	result *chunk.Column,
+	shortCircuitOnTrue bool,
+) error {
+	if err := b.args[0].VecEvalInt(ctx, input, result); err != nil {
+		return err
+	}
+
+	n := input.NumRows()
+	if n == 0 {
+		return nil
+	}
+
+	origSel := input.Sel()
+	lhs := result.Int64s()
+	shortCircuitResult := int64(0)
+	if shortCircuitOnTrue {
+		shortCircuitResult = 1
+	}
+	pendingRows := 0
+	for i := range n {
+		if !result.IsNull(i) && (lhs[i] != 0) == shortCircuitOnTrue {
+			// Logical results are normalized to 0/1. This matters when logical OR
+			// short-circuits on a nonzero integer other than 1.
+			lhs[i] = shortCircuitResult
+			continue
+		}
+		pendingRows++
+	}
+
+	if pendingRows == 0 {
+		return nil
+	}
+
+	buf, err := b.bufAllocator.get()
+	if err != nil {
+		return err
+	}
+	defer b.bufAllocator.put(buf)
+
+	if pendingRows < n {
+		rhsSel := allocSelSlice(pendingRows)
+		defer deallocateSelSlice(rhsSel)
+		rhsSel = rhsSel[:0]
+		for i := range n {
+			if !result.IsNull(i) && (lhs[i] != 0) == shortCircuitOnTrue {
+				continue
+			}
+			physicalRow := i
+			if origSel != nil {
+				physicalRow = origSel[i]
+			}
+			rhsSel = append(rhsSel, physicalRow)
+		}
+		defer input.SetSel(origSel)
+		input.SetSel(rhsSel)
+	}
+	if err := b.args[1].VecEvalInt(ctx, input, buf); err != nil {
+		return err
+	}
+
+	rhs := buf.Int64s()
+	rhsIdx := 0
+	for i := range n {
+		if !result.IsNull(i) && (lhs[i] != 0) == shortCircuitOnTrue {
+			continue
+		}
+
+		lhsIsNull := result.IsNull(i)
+		rhsIsNull := buf.IsNull(rhsIdx)
+		switch {
+		case !rhsIsNull && (rhs[rhsIdx] != 0) == shortCircuitOnTrue:
+			lhs[i] = shortCircuitResult
+			result.SetNull(i, false)
+		case lhsIsNull || rhsIsNull:
+			lhs[i] = 0
+			result.SetNull(i, true)
+		default:
+			lhs[i] = 1 - shortCircuitResult
+			result.SetNull(i, false)
+		}
+		rhsIdx++
+	}
+	return nil
+}
+
+func (b *builtinLogicOrSig) vecEvalIntWithoutShortCircuit(ctx EvalContext, input *chunk.Chunk, result *chunk.Column) error {
 	beforeArg0Warns := ctx.WarningCount()
 	if err := b.args[0].VecEvalInt(ctx, input, result); err != nil {
 		return err
@@ -366,6 +466,17 @@ func (b *builtinLogicAndSig) fallbackEvalInt(ctx EvalContext, input *chunk.Chunk
 }
 
 func (b *builtinLogicAndSig) vecEvalInt(ctx EvalContext, input *chunk.Chunk, result *chunk.Column) error {
+	if ctx.IsShortCircuitExpressionEnabled() {
+		return b.vecEvalIntWithShortCircuit(ctx, input, result)
+	}
+	return b.vecEvalIntWithoutShortCircuit(ctx, input, result)
+}
+
+func (b *builtinLogicAndSig) vecEvalIntWithShortCircuit(ctx EvalContext, input *chunk.Chunk, result *chunk.Column) error {
+	return vecEvalLogicalOpWithShortCircuit(&b.baseBuiltinFunc, ctx, input, result, false)
+}
+
+func (b *builtinLogicAndSig) vecEvalIntWithoutShortCircuit(ctx EvalContext, input *chunk.Chunk, result *chunk.Column) error {
 	n := input.NumRows()
 	beforeArg0Warns := ctx.WarningCount()
 	if err := b.args[0].VecEvalInt(ctx, input, result); err != nil {

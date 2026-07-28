@@ -126,11 +126,21 @@ func TestStatementContextPushDownFLags(t *testing.T) {
 			sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
 			sc.InLoadDataStmt = true
 		}), 1168},
+		{newStmtCtx(func(sc *stmtctx.StatementContext) {
+			sc.EnableShortCircuitExpression = true
+		}), model.FlagEnableShortCircuitExpression},
 	}
 	for _, tt := range testCases {
 		got := tt.in.PushDownFlags()
 		require.Equal(t, tt.out, got)
 	}
+
+	sc := stmtctx.NewStmtCtx()
+	sc.EnableShortCircuitExpression = true
+	sc.InitFromPBFlagAndTz(0, time.UTC)
+	require.False(t, sc.EnableShortCircuitExpression)
+	sc.InitFromPBFlagAndTz(model.FlagEnableShortCircuitExpression, time.UTC)
+	require.True(t, sc.EnableShortCircuitExpression)
 }
 
 func TestWeakConsistencyRead(t *testing.T) {

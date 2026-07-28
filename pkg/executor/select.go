@@ -982,6 +982,7 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 	sc.MatchSQLBindingCache = nil
 
 	sc.SysdateIsNow = ctx.GetSessionVars().SysdateIsNow
+	sc.EnableShortCircuitExpression = vars.EnableShortCircuitExpression
 
 	vars.MemTracker.Detach()
 	vars.MemTracker.UnbindActions()

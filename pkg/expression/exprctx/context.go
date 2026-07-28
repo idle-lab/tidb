@@ -86,6 +86,8 @@ type EvalContext interface {
 	GetDefaultWeekFormatMode() string
 	// GetDivPrecisionIncrement returns the specified value of DivPrecisionIncrement.
 	GetDivPrecisionIncrement() int
+	// IsShortCircuitExpressionEnabled returns whether short-circuit expression evaluation is enabled.
+	IsShortCircuitExpressionEnabled() bool
 	// GetUserVarsReader returns the `UserVarsReader` to read user vars.
 	GetUserVarsReader() variable.UserVarsReader
 	// GetOptionalPropSet returns the optional properties provided by this context.

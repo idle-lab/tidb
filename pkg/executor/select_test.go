@@ -35,6 +35,22 @@ func BenchmarkResetContextOfStmt(b *testing.B) {
 	}
 }
 
+func TestResetContextOfStmtShortCircuitExpression(t *testing.T) {
+	ctx := mock.NewContext()
+	ctx.BindDomainAndSchValidator(&domain.Domain{}, nil)
+	vars := ctx.GetSessionVars()
+
+	vars.EnableShortCircuitExpression = false
+	vars.StmtCtx.EnableShortCircuitExpression = true
+	require.NoError(t, executor.ResetContextOfStmt(ctx, &ast.SelectStmt{}))
+	require.False(t, vars.StmtCtx.EnableShortCircuitExpression)
+
+	vars.EnableShortCircuitExpression = true
+	vars.StmtCtx.EnableShortCircuitExpression = false
+	require.NoError(t, executor.ResetContextOfStmt(ctx, &ast.SelectStmt{}))
+	require.True(t, vars.StmtCtx.EnableShortCircuitExpression)
+}
+
 func TestImportIntoShouldHaveSameFlagsAsInsert(t *testing.T) {
 	insertStmt := &ast.InsertStmt{}
 	importStmt := &ast.ImportIntoStmt{}

@@ -283,6 +283,11 @@ func (ctx *EvalContext) GetDivPrecisionIncrement() int {
 	return ctx.sctx.GetSessionVars().GetDivPrecisionIncrement()
 }
 
+// IsShortCircuitExpressionEnabled returns whether short-circuit expression evaluation is enabled.
+func (ctx *EvalContext) IsShortCircuitExpressionEnabled() bool {
+	return ctx.sctx.GetSessionVars().StmtCtx.EnableShortCircuitExpression
+}
+
 // GetOptionalPropSet gets the optional property set from context
 func (ctx *EvalContext) GetOptionalPropSet() exprctx.OptionalEvalPropKeySet {
 	return ctx.props.PropKeySet()
