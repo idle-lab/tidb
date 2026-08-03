@@ -84,6 +84,13 @@ func (b *builtinLogicOrSig) vecEvalIntWithShortCircuit(ctx EvalContext, input *c
 	return vecEvalLogicalOpWithShortCircuit(&b.baseBuiltinFunc, ctx, input, result, true)
 }
 
+func physicalRow(origSel []int, i int) int {
+	if origSel != nil {
+		return origSel[i]
+	}
+	return i
+}
+
 func vecEvalLogicalOpWithShortCircuit(
 	b *baseBuiltinFunc,
 	ctx EvalContext,
@@ -107,12 +114,28 @@ func vecEvalLogicalOpWithShortCircuit(
 		shortCircuitResult = 1
 	}
 	pendingRows := 0
+	var rhsSel []int
 	for i := range n {
 		if !result.IsNull(i) && (lhs[i] != 0) == shortCircuitOnTrue {
 			// Logical results are normalized to 0/1. This matters when logical OR
 			// short-circuits on a nonzero integer other than 1.
 			lhs[i] = shortCircuitResult
+
+			if rhsSel == nil {
+				rhsSel = allocSelSlice(n)
+				defer deallocateSelSlice(rhsSel)
+				rhsSel = rhsSel[:0]
+
+				// we should fill back pending prefix.
+				for j := range pendingRows {
+					rhsSel = append(rhsSel, physicalRow(origSel, j))
+				}
+			}
 			continue
+		}
+
+		if rhsSel != nil {
+			rhsSel = append(rhsSel, physicalRow(origSel, i))
 		}
 		pendingRows++
 	}
@@ -128,19 +151,6 @@ func vecEvalLogicalOpWithShortCircuit(
 	defer b.bufAllocator.put(buf)
 
 	if pendingRows < n {
-		rhsSel := allocSelSlice(pendingRows)
-		defer deallocateSelSlice(rhsSel)
-		rhsSel = rhsSel[:0]
-		for i := range n {
-			if !result.IsNull(i) && (lhs[i] != 0) == shortCircuitOnTrue {
-				continue
-			}
-			physicalRow := i
-			if origSel != nil {
-				physicalRow = origSel[i]
-			}
-			rhsSel = append(rhsSel, physicalRow)
-		}
 		defer input.SetSel(origSel)
 		input.SetSel(rhsSel)
 	}
