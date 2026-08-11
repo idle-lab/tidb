@@ -1518,6 +1518,240 @@ func (e *TableStorageStatsExtractor) ExplainInfo(_ base.PhysicalPlan) string {
 	return r.String()
 }
 
+// StatsTableExtractor extracts predicates shared by the TIDB_STATS_* virtual tables.
+// String filters are normalized to lower case because database and object names are
+// case-insensitive identifiers. Numeric filters keep their signed values so impossible
+// values can make the resolved object set empty without changing SQL semantics.
+type StatsTableExtractor struct {
+	extractHelper
+
+	// SkipRequest means the extracted predicates cannot match any row.
+	SkipRequest bool
+
+	TableSchema   set.StringSet
+	TableName     set.StringSet
+	PartitionName set.StringSet
+	ColumnName    set.StringSet
+
+	TableSchemaPatterns   []string
+	TableNamePatterns     []string
+	PartitionNamePatterns []string
+	ColumnNamePatterns    []string
+
+	TableIDs     set.Int64Set
+	PhysicalIDs  set.Int64Set
+	IsIndexes    set.Int64Set
+	HistogramIDs set.Int64Set
+}
+
+// Extract implements the base.MemTablePredicateExtractor interface.
+func (e *StatsTableExtractor) Extract(
+	ctx base.PlanContext,
+	schema *expression.Schema,
+	names []*types.FieldName,
+	predicates []expression.Expression,
+) []expression.Expression {
+	e.SkipRequest = false
+	remained := predicates
+	var skip bool
+
+	remained, skip, e.TableSchema = e.extractStatsStringCol(ctx, schema, names, remained, "table_schema")
+	e.SkipRequest = e.SkipRequest || skip
+	remained, skip, e.TableName = e.extractStatsStringCol(ctx, schema, names, remained, "table_name")
+	e.SkipRequest = e.SkipRequest || skip
+	remained, skip, e.PartitionName = e.extractStatsStringCol(ctx, schema, names, remained, "partition_name")
+	e.SkipRequest = e.SkipRequest || skip
+	remained, skip, e.ColumnName = e.extractStatsStringCol(ctx, schema, names, remained, "column_name")
+	e.SkipRequest = e.SkipRequest || skip
+	if e.SkipRequest {
+		return nil
+	}
+
+	remained, e.TableSchemaPatterns = e.extractStatsLikePatternCol(ctx, schema, names, remained, "table_schema")
+	remained, e.TableNamePatterns = e.extractStatsLikePatternCol(ctx, schema, names, remained, "table_name")
+	remained, e.PartitionNamePatterns = e.extractStatsLikePatternCol(ctx, schema, names, remained, "partition_name")
+	remained, e.ColumnNamePatterns = e.extractStatsLikePatternCol(ctx, schema, names, remained, "column_name")
+
+	remained, skip, e.TableIDs = e.extractStatsInt64Col(ctx, schema, names, remained, "table_id")
+	e.SkipRequest = e.SkipRequest || skip
+	remained, skip, e.PhysicalIDs = e.extractStatsInt64Col(ctx, schema, names, remained, "physical_id")
+	e.SkipRequest = e.SkipRequest || skip
+	remained, skip, e.IsIndexes = e.extractStatsInt64Col(ctx, schema, names, remained, "is_index")
+	e.SkipRequest = e.SkipRequest || skip
+	remained, skip, e.HistogramIDs = e.extractStatsInt64Col(ctx, schema, names, remained, "histogram_id")
+	e.SkipRequest = e.SkipRequest || skip
+	if e.SkipRequest {
+		return nil
+	}
+	return remained
+}
+
+func (e *StatsTableExtractor) extractStatsStringCol(
+	ctx base.PlanContext,
+	schema *expression.Schema,
+	names []*types.FieldName,
+	predicates []expression.Expression,
+	columnName string,
+) ([]expression.Expression, bool, set.StringSet) {
+	safePredicates := make([]expression.Expression, 0, len(predicates))
+	unsafePredicates := make([]expression.Expression, 0)
+	for _, predicate := range predicates {
+		if statsPredicateHasUnsafeConstant(predicate) {
+			unsafePredicates = append(unsafePredicates, predicate)
+		} else {
+			safePredicates = append(safePredicates, predicate)
+		}
+	}
+	remained, skip, values := e.extractCol(ctx, schema, names, safePredicates, columnName, true)
+	return append(remained, unsafePredicates...), skip, values
+}
+
+func statsPredicateHasUnsafeConstant(predicate expression.Expression) bool {
+	switch expr := predicate.(type) {
+	case *expression.Constant:
+		return expr.Value.IsNull() || expr.DeferredExpr != nil || expr.ParamMarker != nil
+	case *expression.ScalarFunction:
+		for _, arg := range expr.GetArgs() {
+			if statsPredicateHasUnsafeConstant(arg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e *StatsTableExtractor) extractStatsLikePatternCol(
+	ctx base.PlanContext,
+	schema *expression.Schema,
+	names []*types.FieldName,
+	predicates []expression.Expression,
+	columnName string,
+) ([]expression.Expression, []string) {
+	remained := make([]expression.Expression, 0, len(predicates))
+	patterns := make([]string, 0)
+	extractCols := e.findColumn(schema, names, columnName)
+	if len(extractCols) == 0 {
+		return predicates, patterns
+	}
+	for _, predicate := range predicates {
+		if statsPredicateHasUnsafeConstant(predicate) {
+			remained = append(remained, predicate)
+			continue
+		}
+		fn, ok := predicate.(*expression.ScalarFunction)
+		if !ok {
+			remained = append(remained, predicate)
+			continue
+		}
+		matched := false
+		var pattern string
+		if fn.FuncName.L == ast.Like {
+			matched, pattern, _ = e.extractLikePattern(ctx, fn, columnName, extractCols, true, true)
+		} else if fn.FuncName.L == ast.LogicOr {
+			allLike := true
+			for _, item := range expression.SplitDNFItems(fn) {
+				like, isLike := item.(*expression.ScalarFunction)
+				if !isLike || like.FuncName.L != ast.Like {
+					allLike = false
+					break
+				}
+			}
+			if allLike {
+				matched, pattern, _ = e.extractOrLikePattern(ctx, fn, columnName, extractCols, true, true)
+			}
+		}
+		if !matched {
+			remained = append(remained, predicate)
+			continue
+		}
+		patterns = append(patterns, strings.ToLower(pattern))
+	}
+	return remained, patterns
+}
+
+func (e *StatsTableExtractor) extractStatsInt64Col(
+	ctx base.PlanContext,
+	schema *expression.Schema,
+	names []*types.FieldName,
+	predicates []expression.Expression,
+	columnName string,
+) ([]expression.Expression, bool, set.Int64Set) {
+	safePredicates := make([]expression.Expression, 0, len(predicates))
+	unsafePredicates := make([]expression.Expression, 0)
+	for _, predicate := range predicates {
+		remained, _, strings := e.extractCol(ctx, schema, names, []expression.Expression{predicate}, columnName, false)
+		if len(remained) > 0 {
+			safePredicates = append(safePredicates, predicate)
+			continue
+		}
+		safe := true
+		for value := range strings {
+			if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			safePredicates = append(safePredicates, predicate)
+		} else {
+			unsafePredicates = append(unsafePredicates, predicate)
+		}
+	}
+	remained, skip, strings := e.extractCol(ctx, schema, names, safePredicates, columnName, false)
+	values := set.NewInt64Set()
+	for value := range strings {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return predicates, false, values
+		}
+		values.Insert(parsed)
+	}
+	return append(remained, unsafePredicates...), skip, values
+}
+
+// ExplainInfo implements the base.MemTablePredicateExtractor interface.
+func (e *StatsTableExtractor) ExplainInfo(_ base.PhysicalPlan) string {
+	if e.SkipRequest {
+		return "skip_request: true"
+	}
+	parts := make([]string, 0, 12)
+	appendStringSet := func(name string, values set.StringSet) {
+		if len(values) > 0 {
+			parts = append(parts, fmt.Sprintf("%s:[%s]", name, extractStringFromStringSet(values)))
+		}
+	}
+	appendPatterns := func(name string, patterns []string) {
+		if len(patterns) > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%v", name, patterns))
+		}
+	}
+	appendInt64Set := func(name string, values set.Int64Set) {
+		if len(values) == 0 {
+			return
+		}
+		list := make([]int64, 0, len(values))
+		for value := range values {
+			list = append(list, value)
+		}
+		slices.Sort(list)
+		parts = append(parts, fmt.Sprintf("%s:%v", name, list))
+	}
+
+	appendStringSet("schema", e.TableSchema)
+	appendPatterns("schema_patterns", e.TableSchemaPatterns)
+	appendStringSet("table", e.TableName)
+	appendPatterns("table_patterns", e.TableNamePatterns)
+	appendStringSet("partition", e.PartitionName)
+	appendPatterns("partition_patterns", e.PartitionNamePatterns)
+	appendStringSet("column", e.ColumnName)
+	appendPatterns("column_patterns", e.ColumnNamePatterns)
+	appendInt64Set("table_id", e.TableIDs)
+	appendInt64Set("physical_id", e.PhysicalIDs)
+	appendInt64Set("is_index", e.IsIndexes)
+	appendInt64Set("histogram_id", e.HistogramIDs)
+	return strings.Join(parts, ", ")
+}
+
 // ExplainInfo implements the base.MemTablePredicateExtractor interface.
 func (e *SlowQueryExtractor) ExplainInfo(pp base.PhysicalPlan) string {
 	p := pp.(*physicalop.PhysicalMemTable)

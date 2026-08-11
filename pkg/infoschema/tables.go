@@ -225,6 +225,14 @@ const (
 	TableKeyspaceMeta = "KEYSPACE_META"
 	// TableSchemataExtensions is the table to show read only status of database.
 	TableSchemataExtensions = "SCHEMATA_EXTENSIONS"
+	// TableTiDBStatsMeta exposes all persisted table statistics metadata.
+	TableTiDBStatsMeta = "TIDB_STATS_META"
+	// TableTiDBStatsHistograms exposes all persisted histogram metadata.
+	TableTiDBStatsHistograms = "TIDB_STATS_HISTOGRAMS"
+	// TableTiDBStatsBuckets exposes all persisted histogram buckets.
+	TableTiDBStatsBuckets = "TIDB_STATS_BUCKETS"
+	// TableTiDBStatsTopN exposes all persisted TopN values.
+	TableTiDBStatsTopN = "TIDB_STATS_TOPN"
 )
 
 const (
@@ -355,6 +363,10 @@ var tableIDMap = map[string]int64{
 	ClusterTableTiDBStatementsStats:      autoid.InformationSchemaDBID + 99,
 	TableKeyspaceMeta:                    autoid.InformationSchemaDBID + 100,
 	TableSchemataExtensions:              autoid.InformationSchemaDBID + 101,
+	TableTiDBStatsMeta:                   autoid.InformationSchemaDBID + 102,
+	TableTiDBStatsHistograms:             autoid.InformationSchemaDBID + 103,
+	TableTiDBStatsBuckets:                autoid.InformationSchemaDBID + 104,
+	TableTiDBStatsTopN:                   autoid.InformationSchemaDBID + 105,
 }
 
 // columnInfo represents the basic column information of all kinds of INFORMATION_SCHEMA tables
@@ -1552,6 +1564,65 @@ var tableStorageStatsCols = []columnInfo{
 	{name: "TABLE_KEYS", tp: mysql.TypeLonglong, size: 21, comment: "The count of keys of single replica of the table"},
 }
 
+var tableTiDBStatsMetaCols = []columnInfo{
+	{name: "TABLE_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "PHYSICAL_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "TABLE_SCHEMA", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "TABLE_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "PARTITION_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "UPDATE_TIME", tp: mysql.TypeDatetime, size: 19, flag: mysql.NotNullFlag},
+	{name: "MODIFY_COUNT", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "ROW_COUNT", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag | mysql.UnsignedFlag},
+	{name: "LAST_ANALYZE_TIME", tp: mysql.TypeDatetime, size: 19},
+}
+
+var tableTiDBStatsHistogramsCols = []columnInfo{
+	{name: "TABLE_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "PHYSICAL_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "TABLE_SCHEMA", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "TABLE_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "PARTITION_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "COLUMN_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "IS_INDEX", tp: mysql.TypeTiny, size: 1, flag: mysql.NotNullFlag},
+	{name: "HISTOGRAM_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "UPDATE_TIME", tp: mysql.TypeDatetime, size: 19, flag: mysql.NotNullFlag},
+	{name: "STATS_VERSION", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "DISTINCT_COUNT", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "NULL_COUNT", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "AVG_COL_SIZE", tp: mysql.TypeDouble, size: 22, flag: mysql.NotNullFlag},
+	{name: "CORRELATION", tp: mysql.TypeDouble, size: 22, flag: mysql.NotNullFlag},
+}
+
+var tableTiDBStatsBucketsCols = []columnInfo{
+	{name: "TABLE_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "PHYSICAL_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "TABLE_SCHEMA", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "TABLE_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "PARTITION_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "COLUMN_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "IS_INDEX", tp: mysql.TypeTiny, size: 1, flag: mysql.NotNullFlag},
+	{name: "HISTOGRAM_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "BUCKET_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "COUNT", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "REPEATS", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "LOWER_BOUND", tp: mysql.TypeLongBlob, size: types.UnspecifiedLength},
+	{name: "UPPER_BOUND", tp: mysql.TypeLongBlob, size: types.UnspecifiedLength, flag: mysql.NotNullFlag},
+	{name: "NDV", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+}
+
+var tableTiDBStatsTopNCols = []columnInfo{
+	{name: "TABLE_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "PHYSICAL_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "TABLE_SCHEMA", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "TABLE_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "PARTITION_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "COLUMN_NAME", tp: mysql.TypeVarchar, size: 64, flag: mysql.NotNullFlag},
+	{name: "IS_INDEX", tp: mysql.TypeTiny, size: 1, flag: mysql.NotNullFlag},
+	{name: "HISTOGRAM_ID", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag},
+	{name: "VALUE", tp: mysql.TypeLongBlob, size: types.UnspecifiedLength},
+	{name: "COUNT", tp: mysql.TypeLonglong, size: 21, flag: mysql.NotNullFlag | mysql.UnsignedFlag},
+}
+
 var tableTableTiFlashTablesCols = []columnInfo{
 	// TiFlash DB and Table Name contains the internal KeyspaceID,
 	// which is not suitable for presenting to users. Commented out.
@@ -2555,6 +2626,10 @@ var tableNameToColumns = map[string][]columnInfo{
 	TableTiDBIndexUsage:                     tableTiDBIndexUsage,
 	TableTiDBPlanCache:                      tablePlanCache,
 	TableKeyspaceMeta:                       tableKeyspaceMetaCols,
+	TableTiDBStatsMeta:                      tableTiDBStatsMetaCols,
+	TableTiDBStatsHistograms:                tableTiDBStatsHistogramsCols,
+	TableTiDBStatsBuckets:                   tableTiDBStatsBucketsCols,
+	TableTiDBStatsTopN:                      tableTiDBStatsTopNCols,
 }
 
 func createInfoSchemaTable(_ autoid.Allocators, _ func() (pools.Resource, error), meta *model.TableInfo) (table.Table, error) {

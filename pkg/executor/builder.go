@@ -2667,6 +2667,22 @@ func (b *executorBuilder) buildMemTable(v *physicalop.PhysicalMemTable) exec.Exe
 					extractor:  v.Extractor.(*plannercore.TableStorageStatsExtractor),
 				},
 			}
+		case strings.ToLower(infoschema.TableTiDBStatsMeta),
+			strings.ToLower(infoschema.TableTiDBStatsHistograms),
+			strings.ToLower(infoschema.TableTiDBStatsBuckets),
+			strings.ToLower(infoschema.TableTiDBStatsTopN):
+			memTracker := memory.NewTracker(v.ID(), -1)
+			memTracker.AttachTo(b.sctx.GetSessionVars().StmtCtx.MemTracker)
+			return &MemTableReaderExec{
+				BaseExecutor: exec.NewBaseExecutor(b.sctx, v.Schema(), v.ID()),
+				table:        v.Table,
+				retriever: &statsMemTableRetriever{
+					table:      v.Table,
+					outputCols: v.Columns,
+					extractor:  v.Extractor.(*plannercore.StatsTableExtractor),
+					memTracker: memTracker,
+				},
+			}
 		case strings.ToLower(infoschema.TableDDLJobs):
 			loc := b.sctx.GetSessionVars().Location()
 			ddlJobRetriever := DDLJobRetriever{TZLoc: loc, extractor: v.Extractor}

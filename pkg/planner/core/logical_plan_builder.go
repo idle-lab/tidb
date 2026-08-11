@@ -5439,6 +5439,29 @@ func (b *PlanBuilder) buildMemTable(_ context.Context, dbName ast.CIStr, tableIn
 			p.Extractor = &SlowQueryExtractor{}
 		case infoschema.TableStorageStats:
 			p.Extractor = &TableStorageStatsExtractor{}
+		case infoschema.TableTiDBStatsMeta,
+			infoschema.TableTiDBStatsHistograms,
+			infoschema.TableTiDBStatsBuckets,
+			infoschema.TableTiDBStatsTopN:
+			p.Extractor = &StatsTableExtractor{}
+			backingTable := ""
+			switch upTbl {
+			case infoschema.TableTiDBStatsMeta:
+				backingTable = "stats_meta"
+			case infoschema.TableTiDBStatsHistograms:
+				backingTable = "stats_histograms"
+			case infoschema.TableTiDBStatsBuckets:
+				backingTable = "stats_buckets"
+			}
+			var authErr error
+			if user := b.ctx.GetSessionVars().User; user != nil {
+				if backingTable == "" {
+					authErr = plannererrors.ErrDBaccessDenied.FastGenByArgs(user.AuthUsername, user.AuthHostname, mysql.SystemDB)
+				} else {
+					authErr = plannererrors.ErrTableaccessDenied.FastGenByArgs("SELECT", user.AuthUsername, user.AuthHostname, backingTable)
+				}
+			}
+			b.visitInfo = appendVisitInfo(b.visitInfo, mysql.SelectPriv, mysql.SystemDB, backingTable, "", authErr)
 		case infoschema.TableTiFlashTables, infoschema.TableTiFlashSegments, infoschema.TableTiFlashIndexes:
 			p.Extractor = &TiFlashSystemTableExtractor{}
 		case infoschema.TableStatementsSummary, infoschema.TableStatementsSummaryHistory, infoschema.TableTiDBStatementsStats:

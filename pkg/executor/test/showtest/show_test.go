@@ -330,6 +330,9 @@ func TestShowGrantsPrivilege(t *testing.T) {
 func TestShowStatsPrivilege(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec(`insert into mysql.tidb(variable_name, variable_value, comment) values
+		('tikv_gc_safe_point', '20060102-15:04:05 -0700', 'All versions after safe point can be accessed. (DO NOT EDIT)')
+		on duplicate key update variable_value=values(variable_value), comment=values(comment)`)
 	tk.MustExec("create user show_stats")
 	tk1 := testkit.NewTestKit(t, store)
 
@@ -341,24 +344,46 @@ func TestShowStatsPrivilege(t *testing.T) {
 	require.ErrorContains(t, err, e)
 	err = tk1.ExecToErr("SHOW STATS_HISTOGRAMS")
 	require.ErrorContains(t, err, e)
+	for _, sql := range []string{
+		"select * from information_schema.tidb_stats_meta",
+		"select * from information_schema.tidb_stats_histograms",
+		"select * from information_schema.tidb_stats_buckets",
+	} {
+		err = tk1.ExecToErr(sql)
+		require.ErrorContains(t, err, "SELECT command denied to user 'show_stats'@'%' for table")
+	}
 
 	eqErr := plannererrors.ErrDBaccessDenied.GenWithStackByArgs("show_stats", "%", mysql.SystemDB)
 	err = tk1.ExecToErr("SHOW STATS_HEALTHY")
+	require.EqualError(t, err, eqErr.Error())
+	err = tk1.ExecToErr("select * from information_schema.tidb_stats_topn")
 	require.EqualError(t, err, eqErr.Error())
 	tk.MustExec("grant select on mysql.* to show_stats")
 	tk1.MustExec("show stats_meta")
 	tk1.MustExec("SHOW STATS_BUCKETS")
 	tk1.MustExec("SHOW STATS_HEALTHY")
 	tk1.MustExec("SHOW STATS_HISTOGRAMS")
+	tk1.MustExec("select * from information_schema.tidb_stats_meta")
+	tk1.MustExec("select * from information_schema.tidb_stats_histograms")
+	tk1.MustExec("select * from information_schema.tidb_stats_buckets")
+	tk1.MustExec("select * from information_schema.tidb_stats_topn")
 
 	tk.MustExec("create user a@'%' identified by '';")
 	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "a", Hostname: "%"}, nil, nil, nil))
 	tk.MustExec("grant select on mysql.stats_meta to a@'%';")
 	tk.MustExec("grant select on mysql.stats_buckets to a@'%';")
 	tk.MustExec("grant select on mysql.stats_histograms to a@'%';")
+	tk.MustExec("grant select on mysql.stats_top_n to a@'%';")
 	tk1.MustExec("show stats_meta")
 	tk1.MustExec("SHOW STATS_BUCKETS")
 	tk1.MustExec("SHOW STATS_HISTOGRAMS")
+	tk1.MustExec("select * from information_schema.tidb_stats_meta")
+	tk1.MustExec("select * from information_schema.tidb_stats_histograms")
+	tk1.MustExec("select * from information_schema.tidb_stats_buckets")
+	err = tk1.ExecToErr("select * from information_schema.tidb_stats_topn")
+	require.EqualError(t, err, plannererrors.ErrDBaccessDenied.GenWithStackByArgs("a", "%", mysql.SystemDB).Error())
+	tk.MustExec("grant select on mysql.* to a@'%';")
+	tk1.MustExec("select * from information_schema.tidb_stats_topn")
 }
 
 func TestShowStatsExtendedRemoved(t *testing.T) {

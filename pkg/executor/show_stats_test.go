@@ -293,6 +293,138 @@ func TestShowStatsHasNullValue(t *testing.T) {
 	require.Equal(t, "0", res.Rows()[4][7])
 }
 
+func TestTiDBStatsVirtualTablesReadPersistentStats(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec(`insert into mysql.tidb(variable_name, variable_value, comment) values
+		('tikv_gc_safe_point', '20060102-15:04:05 -0700', 'All versions after safe point can be accessed. (DO NOT EDIT)')
+		on duplicate key update variable_value=values(variable_value), comment=values(comment)`)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int, b varchar(20), index idx_ab(a, b))")
+	tk.MustExec("insert into t values (1, 'one'), (1, 'one'), (2, 'two'), (3, 'three'), (4, null)")
+	tk.MustExec("analyze table t with 4 buckets, 2 topn")
+	tbl, err := dom.InfoSchema().TableByName(context.Background(), ast.NewCIStr("test"), ast.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := tbl.Meta()
+
+	showHistogramRows := tk.MustQuery("show stats_histograms where db_name='test' and table_name='t'").Rows()
+	require.NotEmpty(t, showHistogramRows)
+	showAvgColSize := make(map[string]any, len(showHistogramRows))
+	for _, row := range showHistogramRows {
+		showAvgColSize[fmt.Sprintf("%s/%s", row[3], row[4])] = row[8]
+	}
+
+	showBucketRows := tk.MustQuery("show stats_buckets where db_name='test' and table_name='t'").Rows()
+	expectedBuckets := make([][]any, 0, len(showBucketRows))
+	for _, row := range showBucketRows {
+		expectedBuckets = append(expectedBuckets, row[3:])
+	}
+	showTopNRows := tk.MustQuery("show stats_topn where db_name='test' and table_name='t'").Rows()
+	expectedTopN := make([][]any, 0, len(showTopNRows))
+	for _, row := range showTopNRows {
+		expectedTopN = append(expectedTopN, row[3:])
+	}
+	require.NotEmpty(t, expectedBuckets)
+	require.NotEmpty(t, expectedTopN)
+
+	dom.StatsHandle().Clear()
+	tk.MustQuery("show stats_buckets where db_name='test' and table_name='t'").Check(testkit.Rows())
+	tk.MustQuery("show stats_topn where db_name='test' and table_name='t'").Check(testkit.Rows())
+
+	metaRows := tk.MustQuery(
+		"select table_id, physical_id, table_schema, table_name, partition_name, row_count, " +
+			"last_analyze_time is not null from information_schema.tidb_stats_meta " +
+			"where table_schema='test' and table_name='t'",
+	).Rows()
+	require.Len(t, metaRows, 1)
+	require.Equal(t, metaRows[0][0], metaRows[0][1])
+	require.Equal(t, []any{"test", "t", "", "5", "1"}, metaRows[0][2:])
+
+	histogramRows := tk.MustQuery(
+		"select column_name, is_index, avg_col_size from information_schema.tidb_stats_histograms " +
+			"where table_schema='test' and table_name like 'T' order by column_name, is_index",
+	).Rows()
+	require.Len(t, histogramRows, 3)
+	for _, row := range histogramRows {
+		key := fmt.Sprintf("%s/%s", row[0], row[1])
+		require.Equal(t, showAvgColSize[key], row[2], key)
+	}
+
+	aColumnID := tblInfo.Columns[0].ID
+	predicateSQL := fmt.Sprintf(
+		"select column_name, is_index from information_schema.tidb_stats_histograms "+
+			"where table_schema in ('TEST', 'missing') and table_name in ('T', 'missing') "+
+			"and column_name like 'A' and table_id=%d and physical_id=%d "+
+			"and is_index in (0) and histogram_id=%d",
+		tblInfo.ID,
+		tblInfo.ID,
+		aColumnID,
+	)
+	tk.MustQuery(predicateSQL).Check(testkit.Rows("a 0"))
+	tk.MustQuery(fmt.Sprintf(
+		"select physical_id from information_schema.tidb_stats_meta "+
+			"where table_schema='test' and table_name='t' and physical_id=%d and physical_id=%d.0",
+		tblInfo.ID,
+		tblInfo.ID,
+	)).Check(testkit.Rows(fmt.Sprint(tblInfo.ID)))
+	tk.MustQuery(
+		"select partition_name from information_schema.tidb_stats_meta " +
+			"where table_schema='test' and table_name='t' and partition_name=NULL",
+	).Check(testkit.Rows())
+	tk.MustQuery(
+		"select partition_name from information_schema.tidb_stats_meta " +
+			"where table_schema='test' and table_name='t' and partition_name in ('', NULL)",
+	).Check(testkit.Rows(""))
+	explainRows := tk.MustQuery("explain format='brief' " + predicateSQL).Rows()
+	explainText := fmt.Sprint(explainRows)
+	require.Contains(t, explainText, `schema:["missing","test"]`)
+	require.Contains(t, explainText, `table:["missing","t"]`)
+	require.Contains(t, explainText, "column_patterns:")
+	require.Contains(t, explainText, fmt.Sprintf("table_id:[%d]", tblInfo.ID))
+	require.Contains(t, explainText, fmt.Sprintf("physical_id:[%d]", tblInfo.ID))
+	require.Contains(t, explainText, "is_index:[0]")
+	require.Contains(t, explainText, fmt.Sprintf("histogram_id:[%d]", aColumnID))
+
+	unsupportedPredicateSQL := "select column_name from information_schema.tidb_stats_histograms " +
+		"where table_schema='test' and table_name='t' and char_length(column_name)=1 order by column_name"
+	tk.MustQuery(unsupportedPredicateSQL).Check(testkit.Rows("a", "b"))
+	require.Contains(t, fmt.Sprint(tk.MustQuery("explain format='brief' "+unsupportedPredicateSQL).Rows()), "Selection")
+
+	actualBuckets := tk.MustQuery(
+		"select column_name, is_index, bucket_id, count, repeats, lower_bound, upper_bound, ndv " +
+			"from information_schema.tidb_stats_buckets where table_schema='test' and table_name='t' order by column_name, bucket_id",
+	).Rows()
+	require.ElementsMatch(t, expectedBuckets, actualBuckets)
+	actualTopN := tk.MustQuery(
+		"select column_name, is_index, value, count from information_schema.tidb_stats_topn " +
+			"where table_schema='test' and table_name='t' order by column_name, value",
+	).Rows()
+	require.ElementsMatch(t, expectedTopN, actualTopN)
+
+	tk.MustExec("set @@tidb_partition_prune_mode='dynamic'")
+	tk.MustExec("create table tp (a int, b varchar(20), index idx_a(a)) " +
+		"partition by range(a) (partition p0 values less than (10), partition p1 values less than maxvalue)")
+	tk.MustExec("insert into tp values (1, 'one'), (11, 'eleven')")
+	tk.MustExec("analyze table tp with 4 buckets, 1 topn")
+	partitionedTable, err := dom.InfoSchema().TableByName(context.Background(), ast.NewCIStr("test"), ast.NewCIStr("tp"))
+	require.NoError(t, err)
+	partitionedInfo := partitionedTable.Meta()
+	definitions := partitionedInfo.GetPartitionInfo().Definitions
+	tk.MustQuery(
+		"select table_id, physical_id, partition_name, row_count from information_schema.tidb_stats_meta " +
+			"where table_schema='test' and table_name='tp' order by partition_name",
+	).Check(testkit.Rows(
+		fmt.Sprintf("%d %d global 2", partitionedInfo.ID, partitionedInfo.ID),
+		fmt.Sprintf("%d %d p0 1", partitionedInfo.ID, definitions[0].ID),
+		fmt.Sprintf("%d %d p1 1", partitionedInfo.ID, definitions[1].ID),
+	))
+	tk.MustQuery(
+		fmt.Sprintf("select distinct partition_name from information_schema.tidb_stats_histograms "+
+			"where table_schema='test' and table_name='tp' and physical_id in (%d,%d) "+
+			"and partition_name in ('P0','P1') order by partition_name", definitions[0].ID, definitions[1].ID),
+	).Check(testkit.Rows("p0", "p1"))
+}
+
 func TestShowStatusSnapshot(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 

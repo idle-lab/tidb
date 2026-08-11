@@ -908,3 +908,10 @@ func convertBoundFromBlob(ctx types.Context, blob types.Datum, tp *types.FieldTy
 	}
 	return blob.ConvertTo(ctx, tp)
 }
+
+// ConvertBoundFromBlob converts a persisted histogram bound back to its column type.
+// Callers displaying persisted statistics should use the same conversion as the
+// statistics cache loader so their values remain compatible with SHOW STATS_BUCKETS.
+func ConvertBoundFromBlob(ctx types.Context, blob types.Datum, tp *types.FieldType) (types.Datum, error) {
+	return convertBoundFromBlob(ctx, blob, tp)
+}
