@@ -15,6 +15,11 @@ from information_schema.tidb_stats_histograms
 where table_schema = database() and table_name = 't';
 histogram_count
 3
+select count(*) as unmatched_partition_count
+from information_schema.tidb_stats_histograms
+where table_schema = database() and table_name = 't' and partition_name = 'missing';
+unmatched_partition_count
+0
 select count(*) > 0 as has_buckets,
 sum(lower_bound is not null and upper_bound is not null) = count(*) as readable_bounds
 from information_schema.tidb_stats_buckets

@@ -215,11 +215,11 @@ func (s *sqlRecordSetStatsSource) NextBatch(
 	maxRows int,
 	maxBytes int64,
 ) (rows [][]types.Datum, done bool, err error) {
-	if s.session == nil {
-		return nil, false, errors.New("stats row source is not open")
-	}
 	if s.done {
 		return nil, true, nil
+	}
+	if s.session == nil {
+		return nil, false, errors.New("stats row source is not open")
 	}
 	if maxRows <= 0 {
 		maxRows = statsMemTableMaxBatchRows

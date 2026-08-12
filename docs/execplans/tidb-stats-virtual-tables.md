@@ -21,6 +21,7 @@ The observable success case is to analyze a table, evict or avoid loading its de
 - [x] (2026-08-11 10:08Z) Added regression coverage for persisted reads after cache eviction, SHOW-compatible values and average sizes, partition/global mappings, predicate behavior, privileges, Bucket cross-batch accumulation, and memory release.
 - [x] (2026-08-11 10:08Z) Ran `make bazel_prepare` after the final Go file/import/test-function changes; only `pkg/executor/BUILD.bazel` changed as expected.
 - [x] (2026-08-11 10:27Z) Completed the Ready profile: ran source lint with the repository's existing revive 1.2.1 binary, passed the final failpoint-enabled unit and privilege tests, recorded and verified a focused integration test, and completed diff self-review.
+- [x] (2026-08-11 12:05Z) Fixed the empty-filter EOF path so unmatched physical partitions or histogram objects return an empty result instead of `stats row source is not open`; captured failure-before-fix and pass-after-fix evidence in unit and classic integration tests.
 
 ## Surprises & Discoveries
 
@@ -48,6 +49,9 @@ The observable success case is to analyze a table, evict or avoid loading its de
 - Observation: The classic unistore integration-test server does not seed `mysql.tidb.tikv_gc_safe_point`, while setting `tidb_snapshot` requires it.
   Evidence: The first focused integration recording failed with `can not get 'tikv_gc_safe_point'`; initializing the test-only safe point, as the mock-store regression already does, made recording and non-recording verification pass.
 
+- Observation: An extracted filter that resolves no physical table or no histogram object uses a completed source sentinel with `done=true` and no retained system session.
+  Evidence: `NextBatch` originally checked `session == nil` before `done`, so the sentinel returned `stats row source is not open`. The new regression reproduced the error with an unmatched partition filter before the fix and returned an empty result after the EOF check was moved first.
+
 ## Decision Log
 
 - Decision: Implement proposal option one, four new `INFORMATION_SCHEMA.TIDB_STATS_*` tables, and do not extend SHOW grammar.
@@ -74,11 +78,15 @@ The observable success case is to analyze a table, evict or avoid loading its de
   Rationale: The formula is small and stable, while synthesizing a type-correct Histogram only to call it introduced invalid Chunk layouts and unnecessary allocations.
   Date/Author: 2026-08-11 / Codex
 
+- Decision: Make `sqlRecordSetStatsSource.NextBatch` honor `done` before requiring an open session.
+  Rationale: A completed, unopened source is the intentional EOF representation for empty resolved object sets. Reordering the checks fixes that source contract while preserving the error for an unfinished source that was never opened; adding only a retriever-level `e.done` check would leave the source abstraction internally inconsistent.
+  Date/Author: 2026-08-11 / Codex
+
 ## Outcomes & Retrospective
 
 The four persistent statistics virtual tables are implemented on `feature/tidb-stats-virtual-tables`. They read `mysql.stats_*` at the statement timestamp without loading detailed statistics into StatsCache, use names and types from the matching snapshot InfoSchema, preserve SHOW-compatible Bucket, TopN, and average-column-size output, and expose exact privilege checks and conservative predicate pushdown.
 
-The targeted regression proves that detailed SHOW output becomes empty after StatsCache is cleared while the new virtual tables continue returning the persisted rows. It also compares Bucket, TopN, and average-size values directly with SHOW output before eviction, covers non-partitioned/global/partition identity mapping and extraction edge cases, verifies Bucket cumulative counts across executor batches and complete tracker release, and checks the four-table privilege matrix. A focused classic integration test additionally proves all four SQL surfaces against a built TiDB server.
+The targeted regression proves that detailed SHOW output becomes empty after StatsCache is cleared while the new virtual tables continue returning the persisted rows. It also compares Bucket, TopN, and average-size values directly with SHOW output before eviction, covers non-partitioned/global/partition identity mapping and extraction edge cases, verifies unmatched physical/object filters return empty results, verifies Bucket cumulative counts across executor batches and complete tracker release, and checks the four-table privilege matrix. A focused classic integration test additionally proves all four SQL surfaces and the unmatched-partition EOF behavior against a built TiDB server.
 
 Ready validation passed. No production behavior gaps remain within the proposal. Real TiKV and broad package or repository sweeps were not run because the implementation reads the existing SQL system tables and the repository policy calls for the smallest relevant validation set; the focused integration test used classic unistore.
 
@@ -172,7 +180,7 @@ Final focused validation evidence:
     ok github.com/pingcap/tidb/pkg/executor
     PASS
     ok github.com/pingcap/tidb/pkg/executor/test/showtest
-    ./t/statistics/tidb_stats_virtual_tables.test: ok! 10 test cases passed
+    ./t/statistics/tidb_stats_virtual_tables.test: ok! 11 test cases passed
     integrationtest passed!
 
 Both failpoint-enabled runs ended with `new_refcount=0`. The generated Bazel change is limited to adding `stats_memtable.go` and its direct `ngaut/pools` dependency to `pkg/executor/BUILD.bazel`.
@@ -198,4 +206,4 @@ Define an internal source interface whose ownership contract is explicit:
 
 The implementation uses `sessiontxn` for the current statement timestamp, `domain` and `infoschema.InfoSchema` for snapshot metadata, `sqlexec.RecordSet` and `chunk.Chunk` for streaming internal SQL, `statistics.ValueToString` for SHOW-compatible encoded index formatting, the stats storage bound conversion contract for scalar values, `oracle.GetTimeFromTS` for DATETIME conversion, and statement memory trackers from `pkg/util/memory`.
 
-Plan revision note (2026-08-11): Initial plan created after repository evidence review and before source edits. Updated after implementation to record final design discoveries, exact Ready validation commands, focused integration coverage, outcomes, and remaining validation boundaries.
+Plan revision note (2026-08-11): Initial plan created after repository evidence review and before source edits. Updated after implementation to record final design discoveries, exact Ready validation commands, focused integration coverage, outcomes, and remaining validation boundaries. Updated again after user testing exposed the empty-filter EOF bug to record the corrected source-state contract and regression evidence.

@@ -303,6 +303,14 @@ func TestTiDBStatsVirtualTablesReadPersistentStats(t *testing.T) {
 	tk.MustExec("create table t (a int, b varchar(20), index idx_ab(a, b))")
 	tk.MustExec("insert into t values (1, 'one'), (1, 'one'), (2, 'two'), (3, 'three'), (4, null)")
 	tk.MustExec("analyze table t with 4 buckets, 2 topn")
+	tk.MustQuery(
+		"select column_name from information_schema.tidb_stats_histograms " +
+			"where table_schema='test' and table_name='t' and partition_name='missing'",
+	).Check(testkit.Rows())
+	tk.MustQuery(
+		"select column_name from information_schema.tidb_stats_histograms " +
+			"where table_schema='test' and table_name='t' and column_name='missing'",
+	).Check(testkit.Rows())
 	tbl, err := dom.InfoSchema().TableByName(context.Background(), ast.NewCIStr("test"), ast.NewCIStr("t"))
 	require.NoError(t, err)
 	tblInfo := tbl.Meta()
